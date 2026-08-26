@@ -1,0 +1,21 @@
+{
+  "name": "claude-desktop-limits-tracker",
+  "version": "1.0.0",
+  "description": "Windows Limits Tracker for Claude.ai Desktop App (5-Hour Session Limit & Weekly Limit)",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "cli": "python cli.py",
+    "gui": "python gui.py",
+    "web": "python web_server.py"
+  },
+  "keywords": [
+    "claude",
+    "limits",
+    "tracker",
+    "windows",
+    "claude-desktop"
+  ],
+  "author": "",
+  "license": "MIT"
+}

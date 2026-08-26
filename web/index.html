@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Claude.ai Limits Tracker | Windows</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="logo-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M12 2L14.5 9.5L22 12L14.5 14.5L12 22L9.5 14.5L2 12L9.5 9.5L12 2Z" fill="#da7756"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h1>Claude.ai Limits Tracker</h1>
+          <span class="subtext">Windows Claude Desktop App Monitor</span>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <div class="status-pill" id="claudeStatusPill">
+          <span class="pulse-dot"></span>
+          <span id="claudeStatusText">Checking Claude...</span>
+        </div>
+        <button id="refreshBtn" class="action-btn primary" title="Fetch latest limit data">
+          <svg class="spin-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+          </svg>
+          <span>Refresh</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Account Meta Ribbon -->
+    <section class="account-ribbon">
+      <div class="ribbon-item">
+        <span class="label">ORGANIZATION</span>
+        <span class="value" id="orgName">Connecting...</span>
+      </div>
+      <div class="ribbon-divider"></div>
+      <div class="ribbon-item">
+        <span class="label">PLAN TIER</span>
+        <span class="badge" id="planTier">Free</span>
+      </div>
+      <div class="ribbon-divider"></div>
+      <div class="ribbon-item">
+        <span class="label">LAST SYNC</span>
+        <span class="value mono" id="lastUpdated">--:--:--</span>
+      </div>
+      <div class="ribbon-divider"></div>
+      <div class="ribbon-item">
+        <span class="label">AUTO REFRESH</span>
+        <select id="refreshIntervalSelect" class="select-pill">
+          <option value="30">Every 30s</option>
+          <option value="60" selected>Every 1m</option>
+          <option value="120">Every 2m</option>
+          <option value="300">Every 5m</option>
+        </select>
+      </div>
+    </section>
+
+    <!-- Main Dual Limits Display -->
+    <main class="limits-grid">
+      <!-- 1. Current Session 5-Hour Limit Card -->
+      <div class="limit-card" id="sessionCard">
+        <div class="card-header">
+          <div class="card-title-group">
+            <span class="card-badge session-badge">5-HOUR WINDOW</span>
+            <h2>Current Session Limit</h2>
+          </div>
+          <span class="status-indicator healthy" id="sessionStatusBadge">Full Buffer</span>
+        </div>
+
+        <div class="gauge-container">
+          <div class="svg-gauge-wrap">
+            <svg class="radial-gauge" viewBox="0 0 200 200">
+              <circle class="gauge-track" cx="100" cy="100" r="82" />
+              <circle class="gauge-progress" id="sessionGaugeProgress" cx="100" cy="100" r="82" />
+            </svg>
+            <div class="gauge-center-content">
+              <span class="gauge-percentage" id="sessionPercentLeft">100%</span>
+              <span class="gauge-caption">REMAINING</span>
+              <span class="gauge-sub" id="sessionPercentUsed">0% used</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card-footer-info">
+          <div class="info-row">
+            <span class="info-label">Reset Status</span>
+            <span class="info-val highlight" id="sessionResetHuman">Full limit available</span>
+          </div>
+          <div class="info-row sub">
+            <span class="info-label">Cooldown Rule</span>
+            <span class="info-val" id="sessionResetDetail">Rolling 5 hours from message send time</span>
+          </div>
+          <div class="linear-progress-bar">
+            <div class="linear-fill" id="sessionLinearFill" style="width: 100%;"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2. Weekly (7-Day) Limit Card -->
+      <div class="limit-card" id="weeklyCard">
+        <div class="card-header">
+          <div class="card-title-group">
+            <span class="card-badge weekly-badge">7-DAY WINDOW</span>
+            <h2>Weekly Limit</h2>
+          </div>
+          <span class="status-indicator healthy" id="weeklyStatusBadge">Full Buffer</span>
+        </div>
+
+        <div class="gauge-container">
+          <div class="svg-gauge-wrap">
+            <svg class="radial-gauge" viewBox="0 0 200 200">
+              <circle class="gauge-track" cx="100" cy="100" r="82" />
+              <circle class="gauge-progress" id="weeklyGaugeProgress" cx="100" cy="100" r="82" />
+            </svg>
+            <div class="gauge-center-content">
+              <span class="gauge-percentage" id="weeklyPercentLeft">100%</span>
+              <span class="gauge-caption">REMAINING</span>
+              <span class="gauge-sub" id="weeklyPercentUsed">0% used</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card-footer-info">
+          <div class="info-row">
+            <span class="info-label">Weekly Reset</span>
+            <span class="info-val highlight" id="weeklyResetHuman">Full limit available</span>
+          </div>
+          <div class="info-row sub">
+            <span class="info-label">Scope</span>
+            <span class="info-val" id="weeklyResetDetail">All models combined rolling quota</span>
+          </div>
+          <div class="linear-progress-bar">
+            <div class="linear-fill weekly" id="weeklyLinearFill" style="width: 100%;"></div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Model Breakdown Section (Shown if scoped models exist) -->
+    <section class="models-section" id="modelsSection" style="display: none;">
+      <h3 class="section-title">Model-Specific Weekly Allocations</h3>
+      <div class="models-grid" id="modelsGrid"></div>
+    </section>
+
+    <!-- Usage History Drawer -->
+    <section class="history-section">
+      <div class="history-header">
+        <div class="history-title">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="20" x2="18" y2="10"></line>
+            <line x1="12" y1="20" x2="12" y2="4"></line>
+            <line x1="6" y1="20" x2="6" y2="14"></line>
+          </svg>
+          <h3>Claude Desktop Local Usage History</h3>
+        </div>
+        <span class="history-subtitle">Synced with plan-usage-history.json</span>
+      </div>
+      <div class="history-chart-wrapper">
+        <canvas id="historyChart" height="110"></canvas>
+      </div>
+    </section>
+
+    <!-- Footer Bar -->
+    <footer class="app-footer">
+      <div class="footer-left">
+        <span id="nextRefreshCountdown">Auto-refresh in 60s</span>
+      </div>
+      <div class="footer-right">
+        <span>Windows Claude Desktop Edition • Zero-Config Local Sensor</span>
+      </div>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
