@@ -30,8 +30,8 @@ Download the latest **`ClaudeLimitTracker.exe`** from the **[Releases](../../rel
 If you already have Python installed:
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/claude-limits-tracker.git
-cd claude-limits-tracker
+git clone https://github.com/yashshah1211/claude-desktop-limits-tracker.git
+cd claude-desktop-limits-tracker
 
 # Install lightweight dependencies
 pip install requests psutil cryptography
