@@ -10,10 +10,57 @@ import json
 import time
 import base64
 import ctypes
+import urllib.parse
 from datetime import datetime, timezone
 from ctypes import wintypes
 import requests
 import psutil
+
+# Strict outbound URL allowlist policy
+ALLOWED_SCHEME = "https"
+ALLOWED_HOSTNAME = "claude.ai"
+SESSION_KEY_REGEX = re.compile(r'sk-ant-sid02-[A-Za-z0-9_\-]+')
+
+def mask_session_key(key):
+    """
+    Safely redacts a session key, displaying only the first 8 and last 4 characters.
+    Gracefully handles edge cases (None, empty string, strings < 12 chars) without IndexError.
+    """
+    if not key or not isinstance(key, str):
+        return ""
+    if len(key) < 12:
+        return "*" * len(key)
+    return f"{key[:8]}...{key[-4:]}"
+
+def sanitize_error_message(msg, session_key=None):
+    """
+    Scrubs raw session keys or credential tokens from error messages and exception strings.
+    Replaces matched tokens with their masked representation.
+    """
+    if not msg:
+        return ""
+    text = str(msg)
+    if session_key and isinstance(session_key, str) and session_key in text:
+        text = text.replace(session_key, mask_session_key(session_key))
+    
+    def _repl(match):
+        return mask_session_key(match.group(0))
+    
+    return SESSION_KEY_REGEX.sub(_repl, text)
+
+def safe_claude_get(url, headers=None, cookies=None, timeout=10):
+    """
+    Enforces that outbound HTTP requests strictly target https://claude.ai.
+    Uses exact host parsing (urllib.parse) to reject attacker subdomains
+    (e.g., https://claude.ai.attacker.com) and unencrypted HTTP schemes.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != ALLOWED_SCHEME or parsed.hostname != ALLOWED_HOSTNAME:
+        raise ValueError(
+            f"Security policy violation: Outbound requests are strictly restricted to "
+            f"{ALLOWED_SCHEME}://{ALLOWED_HOSTNAME}. Blocked request to: {parsed.scheme}://{parsed.netloc}"
+        )
+    return requests.get(url, headers=headers, cookies=cookies, timeout=timeout)
 
 # Win32 API setup for memory scanning
 PROCESS_VM_READ = 0x0010
@@ -73,49 +120,63 @@ def is_claude_desktop_running():
 
 def scan_session_key_from_memory():
     """Scans running claude.exe processes for active sessionKey."""
-    claude_pids = []
-    for p in psutil.process_iter(['pid', 'name']):
-        try:
-            if 'claude' in (p.info['name'] or '').lower():
-                claude_pids.append(p.info['pid'])
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
+    try:
+        claude_pids = []
+        for p in psutil.process_iter(['pid', 'name']):
+            try:
+                if 'claude' in (p.info['name'] or '').lower():
+                    claude_pids.append(p.info['pid'])
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
 
-    if not claude_pids:
-        return None
+        if not claude_pids:
+            return None
 
-    # Matches Claude session key tokens
-    pattern = re.compile(rb'sk-ant-sid02-[A-Za-z0-9_\-]{80,130}')
-    
-    for pid in claude_pids:
-        h = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
-        if not h:
-            continue
+        # Matches Claude session key tokens
+        pattern = re.compile(rb'sk-ant-sid02-[A-Za-z0-9_\-]{80,130}')
         
-        mbi = MEMORY_BASIC_INFORMATION()
-        addr = 0
-        found_key = None
-        
-        while VirtualQueryEx(h, ctypes.c_void_p(addr), ctypes.byref(mbi), ctypes.sizeof(mbi)):
-            if mbi.State == MEM_COMMIT and (mbi.Protect in (PAGE_READWRITE, PAGE_READONLY)):
-                size = mbi.RegionSize
-                if size <= 10 * 1024 * 1024:
-                    buf = ctypes.create_string_buffer(size)
-                    bytes_read = ctypes.c_size_t()
-                    if ReadProcessMemory(h, ctypes.c_void_p(addr), buf, size, ctypes.byref(bytes_read)):
-                        matches = pattern.findall(buf.raw[:bytes_read.value])
-                        if matches:
-                            found_key = matches[0].decode('ascii')
-                            break
-            addr += mbi.RegionSize
-            if addr >= 0x7FFFFFFFFFFF:
-                break
-
-        CloseHandle(h)
-        if found_key:
-            return found_key
+        for pid in claude_pids:
+            try:
+                h = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
+            except Exception:
+                continue
+            if not h:
+                continue
             
-    return None
+            mbi = MEMORY_BASIC_INFORMATION()
+            addr = 0
+            found_key = None
+            
+            try:
+                while VirtualQueryEx(h, ctypes.c_void_p(addr), ctypes.byref(mbi), ctypes.sizeof(mbi)):
+                    if mbi.State == MEM_COMMIT and (mbi.Protect in (PAGE_READWRITE, PAGE_READONLY)):
+                        size = mbi.RegionSize
+                        if size <= 10 * 1024 * 1024:
+                            buf = ctypes.create_string_buffer(size)
+                            bytes_read = ctypes.c_size_t()
+                            if ReadProcessMemory(h, ctypes.c_void_p(addr), buf, size, ctypes.byref(bytes_read)):
+                                matches = pattern.findall(buf.raw[:bytes_read.value])
+                                if matches:
+                                    found_key = matches[0].decode('ascii')
+                                    break
+                    addr += mbi.RegionSize
+                    if addr >= 0x7FFFFFFFFFFF:
+                        break
+            finally:
+                CloseHandle(h)
+
+            if found_key:
+                return found_key
+                
+        return None
+    except PermissionError as e:
+        sys.stderr.write(f"[Memory Scanner] Windows permission error accessing claude.exe: {e}\n")
+        return None
+    except Exception as e:
+        # Gracefully handle Windows Defender / AV interference or OS errors without crashing
+        clean_err = sanitize_error_message(str(e))
+        sys.stderr.write(f"[Memory Scanner] Memory scan failed gracefully ({type(e).__name__}): {clean_err}\n")
+        return None
 
 def get_session_key_from_widget_config():
     """Fallback: Decrypts session key stored in widget config if available."""
@@ -210,7 +271,7 @@ def get_primary_organization(session_key):
     """Fetches user organizations and returns the primary chat org."""
     headers, cookies = get_headers_and_cookies(session_key)
     try:
-        r = requests.get("https://claude.ai/api/organizations", headers=headers, cookies=cookies, timeout=10)
+        r = safe_claude_get("https://claude.ai/api/organizations", headers=headers, cookies=cookies, timeout=10)
         if r.status_code != 200:
             return None, f"API returned status {r.status_code}"
         orgs = r.json()
@@ -222,13 +283,13 @@ def get_primary_organization(session_key):
         selected = chat_orgs[0] if chat_orgs else orgs[0]
         return selected, None
     except Exception as e:
-        return None, str(e)
+        return None, sanitize_error_message(str(e), session_key)
 
 def get_organization_details(session_key, org_id):
     """Fetches org metadata such as rate_limit_tier."""
     headers, cookies = get_headers_and_cookies(session_key)
     try:
-        r = requests.get(f"https://claude.ai/api/organizations/{org_id}", headers=headers, cookies=cookies, timeout=10)
+        r = safe_claude_get(f"https://claude.ai/api/organizations/{org_id}", headers=headers, cookies=cookies, timeout=10)
         if r.status_code == 200:
             return r.json()
     except Exception:
@@ -239,12 +300,12 @@ def get_raw_usage(session_key, org_id):
     """Fetches live raw usage from Claude.ai API."""
     headers, cookies = get_headers_and_cookies(session_key)
     try:
-        r = requests.get(f"https://claude.ai/api/organizations/{org_id}/usage", headers=headers, cookies=cookies, timeout=10)
+        r = safe_claude_get(f"https://claude.ai/api/organizations/{org_id}/usage", headers=headers, cookies=cookies, timeout=10)
         if r.status_code == 200:
             return r.json(), None
         return None, f"Usage API returned status {r.status_code}"
     except Exception as e:
-        return None, str(e)
+        return None, sanitize_error_message(str(e), session_key)
 
 def get_local_history(limit=50):
     """Reads usage history samples recorded by Claude Desktop."""
@@ -387,7 +448,7 @@ def get_status(manual_key=None):
     if err or not org:
         return {
             "success": False,
-            "error": f"Failed to get organization: {err}",
+            "error": sanitize_error_message(f"Failed to get organization: {err}", session_key),
             "claude_running": claude_running
         }
 
@@ -404,7 +465,7 @@ def get_status(manual_key=None):
     if err or not usage_data:
         return {
             "success": False,
-            "error": f"Failed to retrieve usage data: {err}",
+            "error": sanitize_error_message(f"Failed to retrieve usage data: {err}", session_key),
             "claude_running": claude_running,
             "account": {
                 "org_id": org_id,

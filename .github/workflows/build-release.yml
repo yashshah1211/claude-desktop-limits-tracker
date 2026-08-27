@@ -31,10 +31,20 @@ jobs:
         run: |
           pyinstaller --onefile --noconsole --name "ClaudeLimitTracker" --icon "assets/icon.ico" --add-data "assets;assets" --add-data "src;src" gui.py
 
+      - name: Generate SHA256 Checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash dist/ClaudeLimitTracker.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  ClaudeLimitTracker.exe" | Out-File -FilePath dist/ClaudeLimitTracker.exe.sha256 -Encoding ascii
+          Write-Host "Generated SHA256:"
+          Get-Content dist/ClaudeLimitTracker.exe.sha256
+
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
-          files: dist/ClaudeLimitTracker.exe
+          files: |
+            dist/ClaudeLimitTracker.exe
+            dist/ClaudeLimitTracker.exe.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

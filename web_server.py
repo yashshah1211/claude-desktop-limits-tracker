@@ -32,7 +32,11 @@ class TrackerHTTPHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/status":
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Access-Control-Allow-Origin", "*")
+            # No CORS header: the dashboard is served from this same origin
+            # (http://127.0.0.1:PORT). A wildcard Access-Control-Allow-Origin
+            # here would let ANY website open in the user's browser read
+            # their usage data / org info via cross-origin fetch(), which
+            # defeats the point of binding to localhost.
             self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
             self.end_headers()
             data = get_status()
@@ -47,7 +51,7 @@ class TrackerHTTPHandler(SimpleHTTPRequestHandler):
         pass
 
 def run(open_browser=True):
-    os.makedirs(WEB_DIR, exist_ok=True)
+    # Bind strictly to 127.0.0.1 (prevents LAN-wide exposure of local usage data and org info)
     server_address = ("127.0.0.1", PORT)
     httpd = HTTPServer(server_address, TrackerHTTPHandler)
     url = f"http://127.0.0.1:{PORT}"

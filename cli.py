@@ -9,6 +9,8 @@ import os
 import time
 import argparse
 import json
+import ctypes
+from ctypes import wintypes
 
 # Ensure UTF-8 output for Windows console
 if hasattr(sys.stdout, 'reconfigure'):
@@ -17,7 +19,7 @@ if hasattr(sys.stdout, 'reconfigure'):
     except Exception:
         pass
 
-from src.claude_client import get_status
+from src.claude_client import get_status, mask_session_key, sanitize_error_message
 
 # ANSI Color codes for Windows terminal
 RESET = "\033[0m"
@@ -52,9 +54,11 @@ def clear_screen():
 
 def print_dashboard(data):
     if not data.get("success"):
-        print(f"\n{RED}{BOLD}[!] Error retrieving Claude limits:{RESET} {data.get('error', 'Unknown error')}")
+        clean_err = sanitize_error_message(data.get('error', 'Unknown error'))
+        print(f"\n{RED}{BOLD}[!] Error retrieving Claude limits:{RESET} {clean_err}")
         if data.get("suggestion"):
-            print(f"{YELLOW}-> Suggestion:{RESET} {data['suggestion']}\n")
+            clean_sug = sanitize_error_message(data['suggestion'])
+            print(f"{YELLOW}-> Suggestion:{RESET} {clean_sug}\n")
         return
 
     account = data.get("account", {})

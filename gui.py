@@ -22,7 +22,7 @@ if hasattr(sys.stdout, 'reconfigure'):
 
 # Add workspace to path
 sys.path.insert(0, os.path.dirname(__file__))
-from src.claude_client import get_status
+from src.claude_client import get_status, sanitize_error_message
 
 # High DPI awareness for crisp rendering on modern Windows screens
 try:
@@ -480,7 +480,7 @@ class ClaudeTrackerApp:
         self.last_data = data
 
         if not data.get("success"):
-            err = data.get("error", "Unknown error")
+            err = sanitize_error_message(data.get("error", "Unknown error"))
             self.lbl_subtitle.configure(text=f"Error: {err}", fg=COLOR_RED)
             self.lbl_running_badge.configure(text="○ Claude Offline", fg=COLOR_YELLOW)
             return
