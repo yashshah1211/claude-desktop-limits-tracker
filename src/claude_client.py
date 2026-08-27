@@ -334,44 +334,164 @@ def get_local_history(limit=50):
     except Exception:
         return []
 
-def get_free_tier_cooldown():
-    """
-    Reads active free tier message cooldown and utilization from Claude Desktop LevelDB.
-    Claude Desktop tracks free message limits via 'claudeai.ochre_heron_tide'.
-    """
-    data_dir = get_claude_data_dir()
-    if not data_dir:
-        return None
-    leveldb_dir = os.path.join(data_dir, "Local Storage", "leveldb")
-    if not os.path.exists(leveldb_dir):
-        return None
+_CACHED_FREE_TIER_COOLDOWN = None
+_COOLDOWN_CACHE_FILE = os.path.expandvars(r"%LOCALAPPDATA%\ClaudeLimitTracker\cooldown_state.json")
+COOLDOWN_MEM_PATTERN = re.compile(rb'\{[^{}]*?"resetsAt":\s*(\d+)[^{}]*?"utilization":\s*([0-9.]+)[^{}]*?\}')
 
-    best_record = None
-    now = time.time()
-
+def _load_persisted_cooldown():
+    """Loads non-sensitive cooldown metadata from local disk cache if valid and unexpired."""
+    if not os.path.exists(_COOLDOWN_CACHE_FILE):
+        return None
     try:
-        for fn in sorted(os.listdir(leveldb_dir)):
-            if fn.endswith(('.log', '.ldb')):
-                fp = os.path.join(leveldb_dir, fn)
-                try:
-                    with open(fp, 'rb') as f:
-                        content = f.read()
-                    matches = re.finditer(rb'\{"resetsAt":\s*(\d+)[^\}]*\}', content)
-                    for m in matches:
-                        try:
-                            obj = json.loads(m.group(0).decode('utf-8', errors='ignore'))
-                            resets_at = obj.get('resetsAt')
-                            if resets_at and resets_at > now:
-                                if not best_record or obj.get('observedAt', 0) > best_record.get('observedAt', 0):
-                                    best_record = obj
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+        with open(_COOLDOWN_CACHE_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, dict) and data.get("resetsAt", 0) > time.time():
+            return {
+                "resetsAt": data["resetsAt"],
+                "utilization": float(data.get("utilization", 0.0)),
+                "observedAt": float(data.get("observedAt", 0.0)),
+                "atWall": bool(data.get("atWall", False))
+            }
+    except Exception:
+        pass
+    return None
+
+def _save_persisted_cooldown(record):
+    """Safely saves non-sensitive cooldown metadata (zero credentials)."""
+    if not record or not isinstance(record, dict):
+        return
+    try:
+        os.makedirs(os.path.dirname(_COOLDOWN_CACHE_FILE), exist_ok=True)
+        payload = {
+            "resetsAt": record.get("resetsAt"),
+            "utilization": record.get("utilization"),
+            "observedAt": record.get("observedAt"),
+            "atWall": record.get("atWall", False)
+        }
+        with open(_COOLDOWN_CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(payload, f)
     except Exception:
         pass
 
-    return best_record
+def scan_free_tier_cooldown_from_memory():
+    """Scans running claude.exe processes for live, uncompressed ochre_heron_tide cooldown record."""
+    try:
+        claude_pids = []
+        for p in psutil.process_iter(['pid', 'name']):
+            try:
+                if 'claude' in (p.info['name'] or '').lower():
+                    claude_pids.append(p.info['pid'])
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        if not claude_pids:
+            return None
+
+        best = None
+        now = time.time()
+        for pid in claude_pids:
+            try:
+                h = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
+            except Exception:
+                continue
+            if not h:
+                continue
+
+            mbi = MEMORY_BASIC_INFORMATION()
+            addr = 0
+            try:
+                while VirtualQueryEx(h, ctypes.c_void_p(addr), ctypes.byref(mbi), ctypes.sizeof(mbi)):
+                    if mbi.State == MEM_COMMIT and (mbi.Protect in (PAGE_READWRITE, PAGE_READONLY)):
+                        size = mbi.RegionSize
+                        if size <= 10 * 1024 * 1024:
+                            buf = ctypes.create_string_buffer(size)
+                            bytes_read = ctypes.c_size_t()
+                            if ReadProcessMemory(h, ctypes.c_void_p(addr), buf, size, ctypes.byref(bytes_read)):
+                                raw = buf.raw[:bytes_read.value]
+                                if b'resetsAt' in raw and b'utilization' in raw:
+                                    for m in COOLDOWN_MEM_PATTERN.finditer(raw):
+                                        try:
+                                            obj = json.loads(m.group(0).decode('utf-8'))
+                                            r_at = obj.get('resetsAt')
+                                            if r_at and r_at > now:
+                                                if not best or obj.get('observedAt', 0) > best.get('observedAt', 0):
+                                                    best = obj
+                                        except Exception:
+                                            pass
+                    addr += mbi.RegionSize
+                    if addr >= 0x7FFFFFFFFFFF:
+                        break
+            finally:
+                CloseHandle(h)
+        return best
+    except Exception:
+        return None
+
+def get_free_tier_cooldown():
+    """
+    Reads active free tier message cooldown and utilization from Claude Desktop.
+    Uses a resilient multi-layered approach to prevent false 100% resets:
+    1. Disk scan of LevelDB write-ahead logs (.log prioritized over compacted .ldb)
+    2. Process memory scan of running claude.exe (uncompressed, live)
+    3. Active in-memory and persistent cooldown cache fallback
+    """
+    global _CACHED_FREE_TIER_COOLDOWN
+    now = time.time()
+    best_record = None
+
+    # 1. First check LevelDB disk files (uncompressed .log files take priority)
+    data_dir = get_claude_data_dir()
+    if data_dir:
+        leveldb_dir = os.path.join(data_dir, "Local Storage", "leveldb")
+        if os.path.exists(leveldb_dir):
+            try:
+                filenames = sorted(os.listdir(leveldb_dir), key=lambda x: (not x.endswith('.log'), x))
+                pattern = re.compile(rb'\{"resetsAt":\s*(\d+)[^\}]*\}')
+                for fn in filenames:
+                    if fn.endswith(('.log', '.ldb')):
+                        fp = os.path.join(leveldb_dir, fn)
+                        try:
+                            with open(fp, 'rb') as f:
+                                content = f.read()
+                            for m in pattern.finditer(content):
+                                try:
+                                    obj = json.loads(m.group(0).decode('utf-8', errors='ignore'))
+                                    resets_at = obj.get('resetsAt')
+                                    if resets_at and resets_at > now:
+                                        if not best_record or obj.get('observedAt', 0) > best_record.get('observedAt', 0):
+                                            best_record = obj
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+    # 2. If disk scan didn't find a record (e.g. during compaction), scan running process memory
+    if not best_record and is_claude_desktop_running():
+        mem_rec = scan_free_tier_cooldown_from_memory()
+        if mem_rec:
+            best_record = mem_rec
+
+    # 3. Update memory and disk caches if a valid record was discovered
+    if best_record:
+        if not _CACHED_FREE_TIER_COOLDOWN or best_record.get('observedAt', 0) >= _CACHED_FREE_TIER_COOLDOWN.get('observedAt', 0):
+            _CACHED_FREE_TIER_COOLDOWN = best_record
+            _save_persisted_cooldown(best_record)
+        return best_record
+
+    # 4. Fallback to active in-memory cache if resetsAt is still in the future
+    if _CACHED_FREE_TIER_COOLDOWN and _CACHED_FREE_TIER_COOLDOWN.get('resetsAt', 0) > now:
+        return _CACHED_FREE_TIER_COOLDOWN
+
+    # 5. Fallback to persistent disk cache if app/process was restarted
+    persisted = _load_persisted_cooldown()
+    if persisted and persisted.get('resetsAt', 0) > now:
+        _CACHED_FREE_TIER_COOLDOWN = persisted
+        return persisted
+
+    # Cooldown has truly elapsed
+    _CACHED_FREE_TIER_COOLDOWN = None
+    return None
 
 def format_time_remaining(resets_at_iso):
     """Calculates human readable countdown to resets_at."""
@@ -546,12 +666,23 @@ def get_status(manual_key=None):
             countdown_str = f"{h}h {m}m" if h > 0 else f"{m}m {s}s"
 
             raw_util = float(free_cooldown.get("utilization", 1.0))
-            session_used = 100.0 if raw_util >= 0.9 else round(raw_util * 100, 1)
+            session_used = min(100.0, round(raw_util * 100.0, 1))
             session_left = round(max(0.0, 100.0 - session_used), 1)
             session_resets_at = resets_dt.isoformat()
             session_rem_sec = diff_sec
-            session_rem_human = f"Out of free messages until {time_str} ({countdown_str} left)"
-            session_status = "danger"
+
+            at_wall = bool(free_cooldown.get("atWall")) or session_used >= 100.0
+            if at_wall:
+                session_rem_human = f"Out of free messages until {time_str} ({countdown_str} left)"
+                session_status = "danger"
+            else:
+                session_rem_human = f"{countdown_str} left (until {time_str})"
+                if session_used >= 90:
+                    session_status = "danger"
+                elif session_used >= 70:
+                    session_status = "warning"
+                else:
+                    session_status = "normal"
 
     # Calculations for Weekly Limit
     weekly_left = round(max(0.0, 100.0 - weekly_used), 1)
