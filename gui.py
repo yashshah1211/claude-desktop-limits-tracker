@@ -8,6 +8,7 @@ import os
 import time
 import math
 import threading
+import queue
 import json
 from datetime import datetime, timezone
 import tkinter as tk
@@ -139,6 +140,8 @@ class ClaudeTrackerApp:
         self.auto_refresh = True
         self.refresh_seconds = 60
         self.countdown_remaining = self.refresh_seconds
+        self.is_refreshing = False
+        self.ui_queue = queue.Queue()
         self.last_data = None
         self.history_visible = False
 
@@ -465,18 +468,34 @@ class ClaudeTrackerApp:
         )
 
     def trigger_refresh(self):
+        if self.is_refreshing:
+            return
+        self.is_refreshing = True
+        self.countdown_remaining = self.refresh_seconds
         self.btn_refresh.configure(state="disabled", text="Refreshing...")
         self.lbl_footer.configure(text="Fetching latest usage from Claude.ai...")
-        
+
         def worker():
-            data = get_status()
-            self.root.after(0, self.update_display, data)
+            try:
+                data = get_status()
+            except Exception as e:
+                data = {"success": False, "error": sanitize_error_message(str(e))}
+            self.ui_queue.put(data)
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def process_queue(self):
+        """Drains pending results and applies them on the Tk main thread."""
+        while True:
+            try:
+                data = self.ui_queue.get_nowait()
+            except queue.Empty:
+                return
+            self.update_display(data)
+
     def update_display(self, data):
+        self.is_refreshing = False
         self.btn_refresh.configure(state="normal", text="↻ Refresh")
-        self.countdown_remaining = self.refresh_seconds
         self.last_data = data
 
         if not data.get("success"):
@@ -570,16 +589,18 @@ class ClaudeTrackerApp:
         self.lbl_footer.configure(text=f"Updated just now  •  Next check in {self.refresh_seconds}s")
 
     def start_timer_loop(self):
-        """Ticks countdown timer every second."""
+        """Ticks countdown timer and drains UI updates on the main thread."""
         def tick():
-            if self.countdown_remaining > 0:
-                self.countdown_remaining -= 1
-                self.lbl_footer.configure(text=f"Auto-refresh in {self.countdown_remaining}s")
-            else:
-                self.trigger_refresh()
-            self.root.after(1000, tick)
+            self.process_queue()
+            if not self.is_refreshing:
+                if self.countdown_remaining > 0:
+                    self.countdown_remaining -= 1
+                    self.lbl_footer.configure(text=f"Auto-refresh in {self.countdown_remaining}s")
+                else:
+                    self.trigger_refresh()
+            self.root.after(250, tick)
 
-        self.root.after(1000, tick)
+        self.root.after(250, tick)
 
 def main():
     root = tk.Tk()

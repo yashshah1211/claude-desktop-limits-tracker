@@ -6,6 +6,7 @@ Serves modern web dashboard and provides JSON API for desktop clients.
 import sys
 import os
 import json
+import socket
 import webbrowser
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse
@@ -22,6 +23,17 @@ from src.claude_client import get_status
 
 PORT = 5173
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
+
+def _find_available_port(start, tries=20):
+    """Returns the first free localhost port starting at `start`, or None."""
+    for port in range(start, start + tries):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", port))
+                return port
+            except OSError:
+                continue
+    return None
 
 class TrackerHTTPHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -52,14 +64,22 @@ class TrackerHTTPHandler(SimpleHTTPRequestHandler):
 
 def run(open_browser=True):
     # Bind strictly to 127.0.0.1 (prevents LAN-wide exposure of local usage data and org info)
-    server_address = ("127.0.0.1", PORT)
+    port = _find_available_port(PORT)
+    if port is None:
+        print(f"Error: no free port available in range {PORT}-{PORT + 19}.")
+        print("Close other applications and try again.")
+        return
+
+    server_address = ("127.0.0.1", port)
     httpd = HTTPServer(server_address, TrackerHTTPHandler)
-    url = f"http://127.0.0.1:{PORT}"
-    
+    url = f"http://127.0.0.1:{port}"
+
     print("=" * 60)
     print(" ✦ Claude.ai Limits Tracker (Windows Web Dashboard)")
     print(f" -> Local Dashboard: {url}")
     print(f" -> Live Status API: {url}/api/status")
+    if port != PORT:
+        print(f" -> Note: default port {PORT} was in use; using {port} instead.")
     print("=" * 60)
     print("Press Ctrl+C to stop the server.\n")
 

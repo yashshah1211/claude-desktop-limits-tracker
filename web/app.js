@@ -8,6 +8,7 @@ let currentData = null;
 let refreshIntervalSec = 60;
 let refreshTimer = null;
 let countdownRemaining = 60;
+let isRefreshing = false;
 let secondTicker = null;
 
 // DOM Elements
@@ -87,6 +88,8 @@ function setGauge(circleEl, pctLeft) {
 }
 
 async function fetchStatus() {
+  if (isRefreshing) return;
+  isRefreshing = true;
   const spinIcon = refreshBtn.querySelector('.spin-icon');
   if (spinIcon) spinIcon.classList.add('spinning');
   refreshBtn.disabled = true;
@@ -104,6 +107,7 @@ async function fetchStatus() {
   } finally {
     if (spinIcon) spinIcon.classList.remove('spinning');
     refreshBtn.disabled = false;
+    isRefreshing = false;
     countdownRemaining = refreshIntervalSec;
   }
 }
@@ -150,6 +154,8 @@ function updateUI(data) {
     ? 'linear-gradient(90deg, #10b981, #34d399)'
     : (sLeft > 15 ? 'linear-gradient(90deg, #f59e0b, #fbbf24)' : 'linear-gradient(90deg, #ef4444, #f87171)');
 
+  sessionResetHuman.textContent = s5h.resets_in_human || 'Full limit available';
+
   updateCountdownDisplay();
 
   // 2. Weekly Limit Update
@@ -171,9 +177,14 @@ function updateUI(data) {
     : (wLeft > 15 ? 'linear-gradient(90deg, #f59e0b, #fbbf24)' : 'linear-gradient(90deg, #ef4444, #f87171)');
 
   if (weekly.resets_at) {
+    weeklyResetHuman.textContent = weekly.resets_in_human || 'Resets soon';
     const wDate = new Date(weekly.resets_at);
     weeklyResetDetail.textContent = `Resets on ${wDate.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })} at ${wDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+  } else if (weekly.resets_in_human) {
+    weeklyResetHuman.textContent = weekly.resets_in_human;
+    weeklyResetDetail.textContent = 'All models 7-day rolling window';
   } else {
+    weeklyResetHuman.textContent = 'Full limit available';
     weeklyResetDetail.textContent = 'All models 7-day rolling window';
   }
 
@@ -218,9 +229,6 @@ function updateCountdownDisplay() {
       const t = new Date(s5h.resets_at);
       sessionResetDetail.textContent = `Reset target: ${t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
     }
-  } else {
-    sessionResetHuman.textContent = 'Full limit available';
-    sessionResetDetail.textContent = 'No active cooldown';
   }
 
   // Weekly reset live countdown
@@ -235,8 +243,6 @@ function updateCountdownDisplay() {
       const m = Math.floor((diff % 3600000) / 60000);
       weeklyResetHuman.textContent = d > 0 ? `Resets in ${d}d ${h}h` : `Resets in ${h}h ${m}m`;
     }
-  } else {
-    weeklyResetHuman.textContent = 'Full limit available';
   }
 }
 
@@ -247,6 +253,7 @@ function startSecondTicker() {
     updateCountdownDisplay();
 
     // Auto-refresh countdown
+    if (isRefreshing) return;
     if (countdownRemaining > 1) {
       countdownRemaining--;
       nextRefreshCountdown.textContent = `Auto-refresh in ${countdownRemaining}s`;

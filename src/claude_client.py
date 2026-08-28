@@ -96,8 +96,20 @@ class MEMORY_BASIC_INFORMATION(ctypes.Structure):
     ]
 
 MEM_COMMIT = 0x1000
-PAGE_READWRITE = 0x04
 PAGE_READONLY = 0x02
+PAGE_READWRITE = 0x04
+PAGE_WRITECOPY = 0x08
+PAGE_EXECUTE_READ = 0x20
+PAGE_EXECUTE_READWRITE = 0x40
+PAGE_EXECUTE_WRITECOPY = 0x80
+PAGE_PROTECTION_MASK = 0xFF
+
+def _is_readable_memory(protect):
+    """True when a committed page's base protection permits reading."""
+    return (protect & PAGE_PROTECTION_MASK) in (
+        PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY,
+        PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY
+    )
 
 CLAUDE_PKG_PATH = os.path.expandvars(r"%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude")
 CLAUDE_STANDARD_PATH = os.path.expandvars(r"%APPDATA%\Claude")
@@ -120,6 +132,10 @@ def is_claude_desktop_running():
 
 def scan_session_key_from_memory():
     """Scans running claude.exe processes for active sessionKey."""
+    if ctypes.sizeof(ctypes.c_void_p) != 8:
+        sys.stderr.write("[Memory Scanner] Skipping memory scan: 64-bit Python required.\n")
+        return None
+
     try:
         claude_pids = []
         for p in psutil.process_iter(['pid', 'name']):
@@ -133,7 +149,7 @@ def scan_session_key_from_memory():
             return None
 
         # Matches Claude session key tokens
-        pattern = re.compile(rb'sk-ant-sid02-[A-Za-z0-9_\-]{80,130}')
+        pattern = re.compile(rb'sk-ant-sid02-[A-Za-z0-9_\-]{80,}')
         
         for pid in claude_pids:
             try:
@@ -149,7 +165,7 @@ def scan_session_key_from_memory():
             
             try:
                 while VirtualQueryEx(h, ctypes.c_void_p(addr), ctypes.byref(mbi), ctypes.sizeof(mbi)):
-                    if mbi.State == MEM_COMMIT and (mbi.Protect in (PAGE_READWRITE, PAGE_READONLY)):
+                    if mbi.State == MEM_COMMIT and _is_readable_memory(mbi.Protect):
                         size = mbi.RegionSize
                         if size <= 10 * 1024 * 1024:
                             buf = ctypes.create_string_buffer(size)
@@ -227,33 +243,62 @@ def get_session_key_from_widget_config():
         pass
     return None
 
+_CACHED_SESSION_KEY = None
+
+def _invalidate_session_key():
+    """Clears the cached session key so the next call rescans for a fresh one."""
+    global _CACHED_SESSION_KEY
+    _CACHED_SESSION_KEY = None
+
+def _find_custom_config_path():
+    """Locates the optional plaintext claude_config.json beside the app.
+
+    Resolves to the repository root when running from source and to the
+    executable's directory when running as a PyInstaller build, falling
+    back to the current working directory.
+    """
+    if getattr(sys, "frozen", False):
+        candidate_dirs = [os.path.dirname(sys.executable)]
+    else:
+        candidate_dirs = [os.path.dirname(os.path.dirname(os.path.abspath(__file__)))]
+    candidate_dirs.append(os.getcwd())
+    for d in candidate_dirs:
+        p = os.path.join(d, "claude_config.json")
+        if os.path.exists(p):
+            return p
+    return None
+
 def get_session_key(manual_key=None):
     """Retrieves session key using memory scan, widget config, or manual override."""
+    global _CACHED_SESSION_KEY
     if manual_key:
         return manual_key
-    
+
+    if _CACHED_SESSION_KEY:
+        return _CACHED_SESSION_KEY
+
     # 1. Try memory scan from running claude.exe
     key = scan_session_key_from_memory()
-    if key:
-        return key
-        
+
     # 2. Try widget config fallback
-    key = get_session_key_from_widget_config()
-    if key:
-        return key
+    if not key:
+        key = get_session_key_from_widget_config()
 
     # 3. Check custom local config if user saved one
-    custom_cfg = os.path.join(os.path.dirname(__file__), "..", "claude_config.json")
-    if os.path.exists(custom_cfg):
-        try:
-            with open(custom_cfg, 'r', encoding='utf-8') as f:
-                saved = json.load(f)
-                if saved.get('sessionKey'):
-                    return saved['sessionKey']
-        except Exception:
-            pass
+    if not key:
+        custom_cfg = _find_custom_config_path()
+        if custom_cfg:
+            try:
+                with open(custom_cfg, 'r', encoding='utf-8') as f:
+                    saved = json.load(f)
+                    if saved.get('sessionKey'):
+                        key = saved['sessionKey']
+            except Exception:
+                pass
 
-    return None
+    if key:
+        _CACHED_SESSION_KEY = key
+    return key
 
 def get_headers_and_cookies(session_key):
     headers = {
@@ -272,6 +317,8 @@ def get_primary_organization(session_key):
     headers, cookies = get_headers_and_cookies(session_key)
     try:
         r = safe_claude_get("https://claude.ai/api/organizations", headers=headers, cookies=cookies, timeout=10)
+        if r.status_code in (401, 403):
+            _invalidate_session_key()
         if r.status_code != 200:
             return None, f"API returned status {r.status_code}"
         orgs = r.json()
@@ -301,6 +348,8 @@ def get_raw_usage(session_key, org_id):
     headers, cookies = get_headers_and_cookies(session_key)
     try:
         r = safe_claude_get(f"https://claude.ai/api/organizations/{org_id}/usage", headers=headers, cookies=cookies, timeout=10)
+        if r.status_code in (401, 403):
+            _invalidate_session_key()
         if r.status_code == 200:
             return r.json(), None
         return None, f"Usage API returned status {r.status_code}"
@@ -375,6 +424,9 @@ def _save_persisted_cooldown(record):
 
 def scan_free_tier_cooldown_from_memory():
     """Scans running claude.exe processes for live, uncompressed ochre_heron_tide cooldown record."""
+    if ctypes.sizeof(ctypes.c_void_p) != 8:
+        return None
+
     try:
         claude_pids = []
         for p in psutil.process_iter(['pid', 'name']):
@@ -400,7 +452,7 @@ def scan_free_tier_cooldown_from_memory():
             addr = 0
             try:
                 while VirtualQueryEx(h, ctypes.c_void_p(addr), ctypes.byref(mbi), ctypes.sizeof(mbi)):
-                    if mbi.State == MEM_COMMIT and (mbi.Protect in (PAGE_READWRITE, PAGE_READONLY)):
+                    if mbi.State == MEM_COMMIT and _is_readable_memory(mbi.Protect):
                         size = mbi.RegionSize
                         if size <= 10 * 1024 * 1024:
                             buf = ctypes.create_string_buffer(size)
@@ -493,14 +545,53 @@ def get_free_tier_cooldown():
     _CACHED_FREE_TIER_COOLDOWN = None
     return None
 
+def _parse_resets_at(value):
+    """Parses a resets_at value into a tz-aware UTC datetime.
+
+    Accepts ISO-8601 strings (with or without a timezone offset) and
+    Unix epoch timestamps given in seconds or milliseconds.
+    Returns None when the value cannot be parsed.
+    """
+    if value is None or value == "":
+        return None
+
+    if isinstance(value, (int, float)):
+        ts = float(value)
+        if abs(ts) > 1e12:
+            ts /= 1000.0
+        try:
+            return datetime.fromtimestamp(ts, tz=timezone.utc)
+        except (ValueError, OverflowError, OSError):
+            return None
+
+    text = str(value).strip()
+
+    # Numeric epoch string (seconds or milliseconds)
+    try:
+        ts = float(text)
+        if abs(ts) > 1e12:
+            ts /= 1000.0
+        return datetime.fromtimestamp(ts, tz=timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        pass
+
+    # ISO-8601 string
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00", 1))
+    except (ValueError, TypeError):
+        return None
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
 def format_time_remaining(resets_at_iso):
     """Calculates human readable countdown to resets_at."""
-    if not resets_at_iso:
-        return None, "Full limit available"
+    resets_dt = _parse_resets_at(resets_at_iso)
+    if resets_dt is None:
+        return None, "Full limit available" if not resets_at_iso else str(resets_at_iso)
 
     try:
-        # ISO string parsing
-        resets_dt = datetime.fromisoformat(resets_at_iso.replace("Z", "+00:00"))
         local_dt = resets_dt.astimezone()
         time_str = local_dt.strftime("%I:%M %p").lstrip("0")
         now = datetime.now(timezone.utc)
@@ -526,7 +617,7 @@ def format_time_remaining(resets_at_iso):
 
         return total_seconds, human
     except Exception:
-        return None, resets_at_iso
+        return None, str(resets_at_iso)
 
 def parse_tier_name(tier_str, billing_type=None):
     if not tier_str:

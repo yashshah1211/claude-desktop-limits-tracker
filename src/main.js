@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain } = require('electron');
+const { app, BrowserWindow, dialog } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 
@@ -20,6 +20,15 @@ function startPythonBackend() {
   pyServer.stderr.on('data', (data) => {
     console.error(`[Python Err] ${data}`);
   });
+
+  pyServer.on('exit', (code) => {
+    if (code && code !== 0 && mainWindow) {
+      dialog.showErrorBox(
+        'Claude.ai Limits Tracker',
+        `Python backend exited unexpectedly (code ${code}).\nMake sure Python is installed and on your PATH.`
+      );
+    }
+  });
 }
 
 function createWindow() {
@@ -37,9 +46,23 @@ function createWindow() {
     }
   });
 
-  // Give python server 500ms to bind port, then load
+  let loadAttempts = 0;
+  const MAX_LOAD_ATTEMPTS = 30;
+  mainWindow.webContents.on('did-fail-load', (_event, _code, _desc, _url, isMainFrame) => {
+    if (!isMainFrame) return;
+    if (loadAttempts < MAX_LOAD_ATTEMPTS) {
+      loadAttempts += 1;
+      setTimeout(() => {
+        if (mainWindow) mainWindow.loadURL(`http://127.0.0.1:${PORT}`);
+      }, 1000);
+    } else {
+      mainWindow.loadFile(path.join(__dirname, '..', 'web', 'index.html'));
+    }
+  });
+
+  // Give python server time to bind the port, then load
   setTimeout(() => {
-    mainWindow.loadURL(`http://127.0.0.1:${PORT}`);
+    if (mainWindow) mainWindow.loadURL(`http://127.0.0.1:${PORT}`);
   }, 600);
 
   mainWindow.on('closed', () => {
